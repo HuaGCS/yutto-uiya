@@ -158,6 +158,7 @@ vip_strict: false # 仅当SESSDATA不为空时生效，严格校验大会员，
 # 用 pip
 pip install git+https://github.com/MrXnneHang/yutto-uiya@gradio-webui
 # 用 uv, 更快
+uv venv -p 3.10 --seed # 创建一个3.10的python环境在当前目录的.venv下
 uv pip install git+https://github.com/MrXnneHang/yutto-uiya@gradio-webui
 ```
 但你需要关注配置文件相关的部分。<br>
