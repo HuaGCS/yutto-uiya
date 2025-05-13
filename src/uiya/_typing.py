@@ -30,7 +30,13 @@ DebugMode = Literal["open", "close"]
 
 
 UiyaSettingsTitle = Literal[
-    "as_package", "SESS_DATA", "download_dir", "login_strict", "vip_strict", "proxy_pool", "debug_mode", "ffmpeg_path"
+    "as_package",
+    "SESS_DATA",
+    "download_dir",
+    "login_strict",
+    "vip_strict",
+    "proxy_pool",
+    "debug_mode",
 ]
 
 
@@ -135,4 +141,3 @@ class YuttoUiyaKeys(TypedDict):
     as_package: str
     custom_proxy_pool: str  # bool
     debug_mode: str  # bool
-    ffmpeg_path: str  # bool
