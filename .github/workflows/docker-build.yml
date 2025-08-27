@@ -221,53 +221,53 @@ jobs:
 
       - name: Check and create Dockerfile if needed
         run: |
-            echo "🔍 检查 Dockerfile..."
-            if [ ! -f "Dockerfile" ]; then
-              echo "❌ 未找到 Dockerfile，创建基础 Dockerfile..."
+          echo "🔍 检查 Dockerfile..."
+          if [ ! -f "Dockerfile" ]; then
+            echo "❌ 未找到 Dockerfile，创建基础 Dockerfile..."
 
-              cat > Dockerfile << 'DOCKERFILE_END'
-              FROM python:3.11-slim
+            cat > Dockerfile << 'DOCKERFILE_END'
+            FROM python:3.11-slim
 
-              LABEL maintainer="auto-generated" \
-              description="yutto-uiya with auto-updating yutto"
+            LABEL maintainer="auto-generated" \
+            description="yutto-uiya with auto-updating yutto"
 
-              ARG VERSION=latest
-              ARG BUILD_DATE
-              ARG TARGETPLATFORM
-              ARG TARGETARCH
+            ARG VERSION=latest
+            ARG BUILD_DATE
+            ARG TARGETPLATFORM
+            ARG TARGETARCH
 
-              ENV PYTHONUNBUFFERED=1 \
-              PYTHONDONTWRITEBYTECODE=1 \
-              PIP_NO_CACHE_DIR=1 \
-              VERSION=${VERSION} \
-              YUTTO_AUTO_UPDATE=true \
-              YUTTO_UPDATE_INTERVAL=3600
+            ENV PYTHONUNBUFFERED=1 \
+            PYTHONDONTWRITEBYTECODE=1 \
+            PIP_NO_CACHE_DIR=1 \
+            VERSION=${VERSION} \
+            YUTTO_AUTO_UPDATE=true \
+            YUTTO_UPDATE_INTERVAL=3600
 
-              RUN apt-get update && apt-get install -y \
-              ffmpeg git curl supervisor procps \
+            RUN apt-get update && apt-get install -y \
+            ffmpeg git curl supervisor procps \
               && rm -rf /var/lib/apt/lists/*
 
-              RUN pip install yutto streamlit uv
+            RUN pip install yutto streamlit uv
 
-              RUN groupadd -r yutto && useradd -r -g yutto yutto
+            RUN groupadd -r yutto && useradd -r -g yutto yutto
 
-              WORKDIR /app
-              COPY . .
+            WORKDIR /app
+            COPY . .
 
-              RUN uv sync || pip install -e . || echo "Dependencies installed"
+            RUN uv sync || pip install -e . || echo "Dependencies installed"
 
-              # 创建更新脚本
-              RUN cat > /usr/local/bin/yutto-updater.sh << 'UPDATER_SCRIPT_END'
-              #!/bin/bash
-              LOG_FILE="/var/log/yutto-updater.log"
-              UPDATE_INTERVAL=${YUTTO_UPDATE_INTERVAL:-3600}
+            # 创建更新脚本
+            RUN cat > /usr/local/bin/yutto-updater.sh << 'UPDATER_SCRIPT_END'
+            #!/bin/bash
+            LOG_FILE="/var/log/yutto-updater.log"
+            UPDATE_INTERVAL=${YUTTO_UPDATE_INTERVAL:-3600}
 
-              log_message() {
-                echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
-              }
+            log_message() {
+              echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+            }
 
-              update_yutto() {
-                if [ "${YUTTO_AUTO_UPDATE:-true}" != "true" ]; then
+            update_yutto() {
+              if [ "${YUTTO_AUTO_UPDATE:-true}" != "true" ]; then
                 return
               fi
 
