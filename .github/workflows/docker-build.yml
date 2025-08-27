@@ -230,6 +230,244 @@ jobs:
         fetch-depth: 0  # 获取完整的 git 历史和标签
         ref: ${{ needs.prepare-matrix.outputs.code-ref }}
 
+    - name: Check and create Dockerfile if needed
+      run: |
+        echo "🔍 检查 Dockerfile..."
+        if [ ! -f "Dockerfile" ]; then
+          echo "❌ 未找到 Dockerfile，创建一个支持 yutto 自动更新的 Dockerfile..."
+
+          cat > Dockerfile << 'DOCKERFILE_EOF'
+# 多阶段构建，支持 yutto 自动更新
+FROM python:3.11-slim
+
+# 设置维护者信息和标签
+LABEL maintainer="auto-generated" \
+      description="yutto-uiya with auto-updating yutto" \
+      version="1.0.0"
+
+# 构建参数
+ARG VERSION=latest
+ARG BUILD_DATE
+ARG TARGETPLATFORM
+ARG TARGETARCH
+
+# 设置环境变量
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    VERSION=${VERSION} \
+    YUTTO_AUTO_UPDATE=true \
+    YUTTO_UPDATE_INTERVAL=3600 \
+    YUTTO_IDLE_TIME=1800
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    git \
+    curl \
+    supervisor \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# 配置 pip 使用国内镜像源（可选）
+#RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 安装 uv 包管理器
+RUN pip install uv
+
+# 创建非 root 用户
+RUN groupadd -r yutto && useradd -r -g yutto -s /bin/bash yutto
+
+# 设置工作目录
+WORKDIR /app
+
+# 复制项目文件
+COPY . .
+
+# 如果在国内，修改 pyproject.toml 使用国内源
+#RUN if [ -f pyproject.toml ]; then \
+#        sed -i 's|python-install-mirror = "https://github.com/astral-sh/python-build-standalone/releases/download"|python-install-mirror = "https://mirror.nju.edu.cn/github-release/indygreg/python-build-standalone/"|g' pyproject.toml && \
+#        sed -i 's|# name = "tsinghua"|name = "tsinghua"|g' pyproject.toml && \
+#        sed -i 's|# url = "https://pypi.tuna.tsinghua.edu.cn/simple"|url = "https://pypi.tuna.tsinghua.edu.cn/simple"|g' pyproject.toml && \
+#        sed -i 's|# default = true|default = true|g' pyproject.toml && \
+#        sed -i 's|name = "pypi"|# name = "pypi"|g' pyproject.toml && \
+#        sed -i 's|url = "https://pypi.org/simple"|# url = "https://pypi.org/simple"|g' pyproject.toml && \
+#        sed -i 's|default= true|# default= true|g' pyproject.toml; \
+#    fi
+
+# 安装 yutto 和其他依赖
+RUN pip install yutto streamlit
+
+# 使用 uv 安装项目依赖（如果可能）
+RUN uv lock || echo "Lock file generation failed, continuing..." && \
+    uv sync || echo "Sync failed, using pip fallback..." && \
+    pip install -e . || echo "Project install failed, dependencies may be handled separately"
+
+# 创建 yutto 智能更新脚本
+RUN cat > /usr/local/bin/yutto-updater.sh << 'UPDATER_EOF'
+#!/bin/bash
+
+LOG_FILE="/var/log/yutto-updater.log"
+LOCK_FILE="/tmp/yutto-update.lock"
+ACTIVITY_FILE="/tmp/yutto-activity"
+UPDATE_INTERVAL=${YUTTO_UPDATE_INTERVAL:-3600}
+
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+check_yutto_activity() {
+    if pgrep -f "yutto" > /dev/null; then
+        log_message "检测到 yutto 进程运行中，跳过更新"
+        return 1
+    fi
+
+    if [ -f "$ACTIVITY_FILE" ]; then
+        local last_activity=$(stat -c %Y "$ACTIVITY_FILE" 2>/dev/null || echo 0)
+        local current_time=$(date +%s)
+        local idle_time=$((current_time - last_activity))
+        local idle_threshold=${YUTTO_IDLE_TIME:-1800}
+
+        if [ $idle_time -lt $idle_threshold ]; then
+            log_message "检测到 $((idle_threshold/60)) 分钟内有活动，延迟更新"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+update_yutto() {
+    if [ -f "$LOCK_FILE" ]; then
+        local lock_age=$(($(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0)))
+        if [ $lock_age -lt 3600 ]; then
+            return
+        else
+            rm -f "$LOCK_FILE"
+        fi
+    fi
+
+    touch "$LOCK_FILE"
+
+    local current_version=$(pip show yutto 2>/dev/null | grep "Version:" | cut -d' ' -f2 || echo "unknown")
+    local latest_version=$(pip index versions yutto 2>/dev/null | head -n1 | awk '{print $2}' || echo "unknown")
+
+    if [ "$current_version" = "$latest_version" ] || [ "$latest_version" = "unknown" ]; then
+        log_message "yutto 已是最新版本: $current_version"
+        rm -f "$LOCK_FILE"
+        return
+    fi
+
+    log_message "发现新版本: $current_version -> $latest_version"
+
+    if ! check_yutto_activity; then
+        rm -f "$LOCK_FILE"
+        return
+    fi
+
+    log_message "开始更新 yutto..."
+
+    if pip install --upgrade yutto 2>&1 | tee -a "$LOG_FILE"; then
+        local new_version=$(pip show yutto | grep "Version:" | cut -d' ' -f2)
+        log_message "✅ yutto 更新成功: $new_version"
+    else
+        log_message "❌ yutto 更新失败"
+    fi
+
+    rm -f "$LOCK_FILE"
+}
+
+if [ "${YUTTO_AUTO_UPDATE:-true}" = "true" ]; then
+    log_message "🚀 yutto 自动更新守护程序启动"
+    while true; do
+        update_yutto
+        sleep $UPDATE_INTERVAL
+    done
+else
+    log_message "⚠️ 自动更新已禁用"
+    sleep infinity
+fi
+UPDATER_EOF
+
+# 创建 supervisor 配置
+RUN mkdir -p /etc/supervisor/conf.d && \
+    cat > /etc/supervisor/conf.d/yutto-services.conf << 'SUPERVISOR_EOF'
+[program:yutto-updater]
+command=/bin/bash /usr/local/bin/yutto-updater.sh
+user=yutto
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/var/log/yutto-updater.log
+
+[program:streamlit]
+command=streamlit run src/uiya/yutto_uiya.py --server.address 0.0.0.0 --server.port 8501
+directory=/app
+user=yutto
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/var/log/streamlit.log
+environment=PYTHONPATH="/app:/app/src"
+SUPERVISOR_EOF
+
+# 设置权限和目录
+RUN chmod +x /usr/local/bin/yutto-updater.sh && \
+    mkdir -p /var/log /app/downloads /app/config /home/yutto && \
+    touch /var/log/yutto-updater.log /var/log/streamlit.log && \
+    chown -R yutto:yutto /app /var/log/yutto-updater.log /var/log/streamlit.log /tmp /home/yutto
+
+# 创建启动脚本
+RUN cat > /usr/local/bin/start-services.sh << 'START_EOF'
+#!/bin/bash
+
+echo "🚀 启动 yutto-uiya (版本: ${VERSION})"
+echo "📋 配置: 自动更新=${YUTTO_AUTO_UPDATE:-true}, 检查间隔=${YUTTO_UPDATE_INTERVAL:-3600}秒"
+
+# 检查应用文件是否存在
+if [ -f "/app/src/uiya/yutto_uiya.py" ]; then
+    echo "✅ 找到应用文件: /app/src/uiya/yutto_uiya.py"
+elif [ -f "/app/yutto_uiya.py" ]; then
+    echo "✅ 找到应用文件: /app/yutto_uiya.py"
+    # 如果在根目录，更新 supervisor 配置
+    sed -i 's|src/uiya/yutto_uiya.py|yutto_uiya.py|g' /etc/supervisor/conf.d/yutto-services.conf
+else
+    echo "❌ 未找到 yutto_uiya.py 文件，请检查项目结构"
+    echo "尝试查找..."
+    find /app -name "*yutto*.py" -type f | head -5
+fi
+
+# 确保权限正确
+mkdir -p /var/log
+touch /var/log/yutto-updater.log /var/log/streamlit.log
+chown yutto:yutto /var/log/yutto-updater.log /var/log/streamlit.log
+
+# 启动 supervisor
+exec /usr/bin/supervisord -n -c /etc/supervisor/supervisord.conf
+START_EOF
+
+RUN chmod +x /usr/local/bin/start-services.sh
+
+# 暴露端口
+EXPOSE 8501
+
+# 设置时区
+ENV TZ=Asia/Shanghai
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8501/_stcore/health || exit 1
+
+# 使用 supervisor 启动所有服务
+CMD ["/usr/local/bin/start-services.sh"]
+DOCKERFILE_EOF
+
+          echo "✅ 自动生成的 Dockerfile 已创建"
+        else
+          echo "✅ 发现现有的 Dockerfile"
+        fi
+
     - name: Extract metadata
       id: meta
       run: |
