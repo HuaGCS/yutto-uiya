@@ -53,16 +53,6 @@ jobs:
             && format('v{0}', github.event.inputs.version)
             || 'dev'
           }}
-      with:
-        fetch-depth: 0  # 获取完整的 git 历史
-        ref: |
-          ${{
-            github.event_name == 'workflow_dispatch' &&
-            github.event.inputs.use_tag_code == 'true' &&
-            github.event.inputs.version != 'latest'
-            && format('v{0}', github.event.inputs.version)
-            || 'dev'
-          }}
 
     - name: Check if tag is on dev branch
       id: check
