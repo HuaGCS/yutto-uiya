@@ -1,0 +1,272 @@
+name: Build and Push to GitHub Container Registry
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # 匹配 v1.1.4 格式的标签
+    branches:
+      - dev       # dev 分支推送时构建测试镜像
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      version:
+        description: '版本号 (例如: 1.1.4 或 latest)'
+        required: true
+        default: 'latest'
+      push_to_registry:
+        description: '是否推送到镜像仓库'
+        type: boolean
+        default: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/yutto-uiya
+
+jobs:
+  # 构建单架构镜像
+  build-single-arch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd
+          - platform: linux/arm64
+            arch: arm64
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Extract metadata
+      id: meta
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          # 手动触发
+          VERSION="${{ github.event.inputs.version }}"
+          if [[ "$VERSION" != "latest" ]]; then
+            SHORT_VERSION="$VERSION"
+          else
+            SHORT_VERSION="latest"
+          fi
+        elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/dev" ]]; then
+          # dev 分支推送，使用 dev 标签
+          VERSION="dev"
+          SHORT_VERSION="dev"
+        else
+          # 标签触发
+          VERSION=${GITHUB_REF#refs/tags/}
+          SHORT_VERSION=${VERSION#v}
+        fi
+
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
+
+        # 转换为小写（GitHub Container Registry 要求）
+        IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+        echo "image_name_lower=${IMAGE_NAME_LOWER}" >> $GITHUB_OUTPUT
+
+        # 生成单架构镜像标签
+        ARCH_TAGS="${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:${SHORT_VERSION}"
+
+        # 只有在非 dev 分支时才添加 latest 标签
+        if [[ "${SHORT_VERSION}" != "dev" ]]; then
+          ARCH_TAGS="${ARCH_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:latest"
+        fi
+
+        # 如果是稳定版本，添加 stable 标签
+        if [[ ! "${VERSION}" =~ (alpha|beta|rc|latest|dev) ]]; then
+          ARCH_TAGS="${ARCH_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:stable"
+        fi
+
+        echo "arch_tags=${ARCH_TAGS}" >> $GITHUB_OUTPUT
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      if: github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push single-arch image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: ${{ matrix.platform }}
+        push: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true' }}
+        tags: ${{ steps.meta.outputs.arch_tags }}
+        labels: |
+          org.opencontainers.image.title=yutto-uiya-${{ matrix.arch }}
+          org.opencontainers.image.description=yutto-uiya - bilibili video downloader with Streamlit WebUI (${{ matrix.arch }})
+          org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.licenses=MIT
+          org.opencontainers.image.platform=${{ matrix.platform }}
+        build-args: |
+          VERSION=${{ steps.meta.outputs.version }}
+          BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          TARGETPLATFORM=${{ matrix.platform }}
+          TARGETARCH=${{ matrix.arch }}
+        cache-from: type=gha,scope=${{ matrix.arch }}
+        cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+  # 构建多架构通用镜像
+  build-multi-arch:
+    needs: build-single-arch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Extract metadata
+      id: meta
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          # 手动触发
+          VERSION="${{ github.event.inputs.version }}"
+          if [[ "$VERSION" != "latest" ]]; then
+            SHORT_VERSION="$VERSION"
+          else
+            SHORT_VERSION="latest"
+          fi
+        elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/dev" ]]; then
+          # dev 分支推送，使用 dev 标签
+          VERSION="dev"
+          SHORT_VERSION="dev"
+        else
+          # 标签触发
+          VERSION=${GITHUB_REF#refs/tags/}
+          SHORT_VERSION=${VERSION#v}
+        fi
+
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
+
+        # 转换为小写
+        IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+        echo "image_name_lower=${IMAGE_NAME_LOWER}" >> $GITHUB_OUTPUT
+
+        # 生成多架构镜像标签
+        MULTI_TAGS="${REGISTRY}/${IMAGE_NAME_LOWER}:${SHORT_VERSION}"
+
+        # 只有在非 dev 分支时才添加 latest 标签
+        if [[ "${SHORT_VERSION}" != "dev" ]]; then
+          MULTI_TAGS="${MULTI_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}:latest"
+        fi
+
+        # 如果是稳定版本，添加 stable 标签
+        if [[ ! "${VERSION}" =~ (alpha|beta|rc|latest|dev) ]]; then
+          MULTI_TAGS="${MULTI_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}:stable"
+        fi
+
+        echo "multi_tags=${MULTI_TAGS}" >> $GITHUB_OUTPUT
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      if: github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push multi-arch image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true' }}
+        tags: ${{ steps.meta.outputs.multi_tags }}
+        labels: |
+          org.opencontainers.image.title=yutto-uiya
+          org.opencontainers.image.description=yutto-uiya - bilibili video downloader with Streamlit WebUI
+          org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.licenses=MIT
+        build-args: |
+          VERSION=${{ steps.meta.outputs.version }}
+          BUILD_DATE=${{ github.event.head_commit.timestamp }}
+        cache-from: |
+          type=gha,scope=amd
+          type=gha,scope=arm64
+        cache-to: type=gha,mode=max,scope=multi
+
+  # 构建状态通知
+  notify:
+    needs: [build-single-arch, build-multi-arch]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+    - name: Extract metadata
+      id: meta
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          VERSION="${{ github.event.inputs.version }}"
+          if [[ "$VERSION" != "latest" ]]; then
+            SHORT_VERSION="$VERSION"
+          else
+            SHORT_VERSION="latest"
+          fi
+        elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/dev" ]]; then
+          VERSION="dev"
+          SHORT_VERSION="dev"
+        else
+          VERSION=${GITHUB_REF#refs/tags/}
+          SHORT_VERSION=${VERSION#v}
+        fi
+
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
+
+        IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+        echo "image_name_lower=${IMAGE_NAME_LOWER}" >> $GITHUB_OUTPUT
+
+    - name: Success Summary
+      if: needs.build-single-arch.result == 'success' && needs.build-multi-arch.result == 'success'
+      run: |
+        echo "## ✅ Docker 镜像构建成功！" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 构建的镜像" >> $GITHUB_STEP_SUMMARY
+        echo "- **多架构镜像**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **AMD64 专用**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-amd:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **ARM64 专用**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-arm64:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🚀 使用方法" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "docker run -d -p 8501:8501 -v \$(pwd)/downloads:/app/downloads \\" >> $GITHUB_STEP_SUMMARY
+        echo "  ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}:${{ steps.meta.outputs.short_version }}" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+    - name: Failure Summary
+      if: needs.build-single-arch.result == 'failure' || needs.build-multi-arch.result == 'failure'
+      run: |
+        echo "## ❌ Docker 镜像构建失败！" >> $GITHUB_STEP_SUMMARY
+        echo "请查看上方的构建日志获取详细错误信息。" >> $GITHUB_STEP_SUMMARY
+        exit 1

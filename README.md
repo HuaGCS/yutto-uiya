@@ -214,3 +214,50 @@ uv run streamlit run src/uiya/yutto_uiya.py
 -  [ ] 提高解析速度.
 -  [x] 简化安装步骤.
 -  [ ] 可增添的任务列表 / 按任务列表启动下载
+
+## 🐳 Docker 镜像
+
+本项目通过 GitHub Actions 自动构建多架构 Docker 镜像并发布到 GitHub Container Registry。
+
+### 快速使用
+
+```bash
+# 使用多架构镜像（推荐）
+docker run -d --name yutto-uiya \
+  -p 8501:8501 \
+  -v $(pwd)/downloads:/app/downloads \
+  ghcr.io/HuaGCS/yutto-uiya:latest
+
+# 访问 Web 界面
+open http://localhost:8501
+```
+
+### 可用镜像
+
+- **稳定版本**：`ghcr.io/HuaGCS/yutto-uiya:latest`
+- **开发版本**：`ghcr.io/HuaGCS/yutto-uiya:dev`
+- **AMD64 专用**：`ghcr.io/HuaGCS/yutto-uiya-amd:latest`
+- **ARM64 专用**：`ghcr.io/HuaGCS/yutto-uiya-arm64:latest`
+
+### 构建状态
+
+![Docker Build](https://github.com/HuaGCS/yutto-uiya/actions/workflows/docker-build.yml/badge.svg)
+
+### Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  yutto-uiya:
+    image: ghcr.io/HuaGCS/yutto-uiya:latest
+    container_name: yutto-uiya
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./downloads:/app/downloads
+      - ./config:/app/config
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+```
+
