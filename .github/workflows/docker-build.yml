@@ -223,9 +223,9 @@ jobs:
         run: |
           echo "🔍 检查 Dockerfile..."
           if [ ! -f "Dockerfile" ]; then
-            echo "❌ 未找到 Dockerfile，创建一个支持 yutto 自动更新的 Dockerfile..."
+            echo "❌ 未找到 Dockerfile，创建基础 Dockerfile..."
 
-            cat > Dockerfile << 'DOCKERFILE_EOF'
+            cat > Dockerfile << 'EOF'
             FROM python:3.11-slim
 
             LABEL maintainer="auto-generated" \
@@ -239,117 +239,67 @@ jobs:
             ENV PYTHONUNBUFFERED=1 \
             PYTHONDONTWRITEBYTECODE=1 \
             PIP_NO_CACHE_DIR=1 \
-            PIP_DISABLE_PIP_VERSION_CHECK=1 \
             VERSION=${VERSION} \
             YUTTO_AUTO_UPDATE=true \
-            YUTTO_UPDATE_INTERVAL=3600 \
-            YUTTO_IDLE_TIME=1800
+            YUTTO_UPDATE_INTERVAL=3600
 
             RUN apt-get update && apt-get install -y \
-            ffmpeg git curl supervisor procps \
-            && rm -rf /var/lib/apt/lists/*
+              ffmpeg git curl supervisor procps \
+              && rm -rf /var/lib/apt/lists/*
 
-            RUN pip install uv yutto streamlit
+            RUN pip install yutto streamlit uv
 
-            RUN groupadd -r yutto && useradd -r -g yutto -s /bin/bash yutto
+            RUN groupadd -r yutto && useradd -r -g yutto yutto
 
             WORKDIR /app
             COPY . .
 
-            RUN uv sync || pip install -e . || echo "Project install completed"
+            RUN uv sync || pip install -e . || echo "Dependencies installed"
 
-            RUN cat > /usr/local/bin/yutto-updater.sh << 'UPDATER_EOF'
+            RUN cat > /usr/local/bin/yutto-updater.sh << 'UPDATER_SCRIPT'
             #!/bin/bash
             LOG_FILE="/var/log/yutto-updater.log"
-            LOCK_FILE="/tmp/yutto-update.lock"
-            ACTIVITY_FILE="/tmp/yutto-activity"
             UPDATE_INTERVAL=${YUTTO_UPDATE_INTERVAL:-3600}
 
             log_message() {
               echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
             }
 
-            check_yutto_activity() {
-              if pgrep -f "yutto" > /dev/null; then
-              log_message "检测到 yutto 进程运行中，跳过更新"
-              return 1
-              fi
-
-              if [ -f "$ACTIVITY_FILE" ]; then
-                local last_activity=$(stat -c %Y "$ACTIVITY_FILE" 2>/dev/null || echo 0)
-                local current_time=$(date +%s)
-                local idle_time=$((current_time - last_activity))
-                local idle_threshold=${YUTTO_IDLE_TIME:-1800}
-
-                if [ $idle_time -lt $idle_threshold ]; then
-                  log_message "检测到活动，延迟更新"
-                  return 1
-                fi
-              fi
-
-              return 0
-            }
-
             update_yutto() {
-              if [ -f "$LOCK_FILE" ]; then
-                local lock_age=$(($(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0)))
-                if [ $lock_age -lt 3600 ]; then
-                  return
-                else
-                  rm -f "$LOCK_FILE"
+              if [ "${YUTTO_AUTO_UPDATE:-true}" != "true" ]; then
+                return
                 fi
-              fi
 
-              touch "$LOCK_FILE"
-
-              local current_version=$(pip show yutto 2>/dev/null | grep "Version:" | cut -d' ' -f2 || echo "unknown")
-              local latest_version=$(pip index versions yutto 2>/dev/null | head -n1 | awk '{print $2}' || echo "unknown")
-
-              if [ "$current_version" = "$latest_version" ] || [ "$latest_version" = "unknown" ]; then
-                log_message "yutto 已是最新版本: $current_version"
-                rm -f "$LOCK_FILE"
+              if pgrep -f "yutto" > /dev/null; then
+                log_message "yutto 进程运行中，跳过更新"
                 return
               fi
 
-              log_message "发现新版本: $current_version -> $latest_version"
+              local current=$(pip show yutto 2>/dev/null | grep "Version:" | cut -d' ' -f2 || echo "unknown")
+              local latest=$(pip index versions yutto 2>/dev/null | head -n1 | awk '{print $2}' || echo "unknown")
 
-              if ! check_yutto_activity; then
-                rm -f "$LOCK_FILE"
-                return
+              if [ "$current" != "$latest" ] && [ "$latest" != "unknown" ]; then
+                log_message "更新 yutto: $current -> $latest"
+                pip install --upgrade yutto && log_message "更新成功" || log_message "更新失败"
               fi
-
-              log_message "开始更新 yutto..."
-
-              if pip install --upgrade yutto; then
-                local new_version=$(pip show yutto | grep "Version:" | cut -d' ' -f2)
-                log_message "✅ yutto 更新成功: $new_version"
-              else
-                log_message "❌ yutto 更新失败"
-              fi
-
-              rm -f "$LOCK_FILE"
             }
 
-            if [ "${YUTTO_AUTO_UPDATE:-true}" = "true" ]; then
-              log_message "🚀 yutto 自动更新守护程序启动"
-              while true; do
-                update_yutto
-                sleep $UPDATE_INTERVAL
-                done
-              else
-                log_message "⚠️ 自动更新已禁用"
-                sleep infinity
-              fi
-            UPDATER_EOF
+            log_message "yutto 更新守护程序启动"
+            while true; do
+              update_yutto
+              sleep $UPDATE_INTERVAL
+            done
+            UPDATER_SCRIPT
 
-            RUN mkdir -p /etc/supervisor/conf.d && \
-            c  at > /etc/supervisor/conf.d/yutto-services.conf << 'SUPERVISOR_EOF'
+            RUN mkdir -p /etc/supervisor/conf.d /var/log && \
+            chmod +x /usr/local/bin/yutto-updater.sh
+
+            RUN cat > /etc/supervisor/conf.d/services.conf << 'SUPERVISOR_CONF'
             [program:yutto-updater]
             command=/bin/bash /usr/local/bin/yutto-updater.sh
             user=yutto
             autostart=true
             autorestart=true
-            redirect_stderr=true
             stdout_logfile=/var/log/yutto-updater.log
 
             [program:streamlit]
@@ -358,39 +308,11 @@ jobs:
             user=yutto
             autostart=true
             autorestart=true
-            redirect_stderr=true
             stdout_logfile=/var/log/streamlit.log
-            environment=PYTHONPATH="/app:/app/src"
-            SUPERVISOR_EOF
+            environment=PYTHONPATH=/app:/app/src
+            SUPERVISOR_CONF
 
-            RUN chmod +x /usr/local/bin/yutto-updater.sh && \
-            mkdir -p /var/log /app/downloads /app/config /home/yutto && \
-            touch /var/log/yutto-updater.log /var/log/streamlit.log && \
-            chown -R yutto:yutto /app /var/log/yutto-updater.log /var/log/streamlit.log /tmp /home/yutto
-
-            RUN cat > /usr/local/bin/start-services.sh << 'START_EOF'
-            #!/bin/bash
-            echo "🚀 启动 yutto-uiya (版本: ${VERSION})"
-            echo "📋 配置: 自动更新=${YUTTO_AUTO_UPDATE:-true}"
-
-            if [ -f "/app/src/uiya/yutto_uiya.py" ]; then
-              echo "✅ 找到应用文件: /app/src/uiya/yutto_uiya.py"
-            elif [ -f "/app/yutto_uiya.py" ]; then
-              echo "✅ 找到应用文件: /app/yutto_uiya.py"
-              sed -i 's|src/uiya/yutto_uiya.py|yutto_uiya.py|g' /etc/supervisor/conf.d/yutto-services.conf
-            else
-              echo "❌ 未找到 yutto_uiya.py 文件"
-              find /app -name "*yutto*.py" -type f | head -5
-            fi
-
-            mkdir -p /var/log
-            touch /var/log/yutto-updater.log /var/log/streamlit.log
-            chown yutto:yutto /var/log/yutto-updater.log /var/log/streamlit.log
-
-            exec /usr/bin/supervisord -n -c /etc/supervisor/supervisord.conf
-            START_EOF
-
-            RUN chmod +x /usr/local/bin/start-services.sh
+            RUN chown -R yutto:yutto /app /var/log
 
             EXPOSE 8501
             ENV TZ=Asia/Shanghai
@@ -398,446 +320,275 @@ jobs:
             HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
             CMD curl -f http://localhost:8501/_stcore/health || exit 1
 
-            CMD ["/usr/local/bin/start-services.sh"]
-            DOCKERFILE_EOF
+            CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]
+            EOF
 
-            echo "✅ 自动生成的 Dockerfile 已创建"
+            echo "✅ 基础 Dockerfile 已创建"
           else
             echo "✅ 发现现有的 Dockerfile"
           fi
 
-      - name: Set build matrix
-        id: set-matrix
+      - name: Extract metadata
+        id: meta
         run: |
-          # 确定要构建的架构
+          VERSION="${{ needs.prepare-matrix.outputs.actual-version }}"
+          SHORT_VERSION="${{ needs.prepare-matrix.outputs.short-version }}"
+
+          if [[ "$SHORT_VERSION" =~ ^v[0-9] ]]; then
+            SHORT_VERSION="${SHORT_VERSION#v}"
+          fi
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
+
+          IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          echo "image_name_lower=${IMAGE_NAME_LOWER}" >> $GITHUB_OUTPUT
+
+          # 生成标签
+          ARCH_TAGS="${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:${SHORT_VERSION}"
+          ARCH_TAGS="${ARCH_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:latest"
+
+          if [[ ! "${VERSION}" =~ (alpha|beta|rc|latest) ]]; then
+            ARCH_TAGS="${ARCH_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:stable"
+          fi
+
+          echo "arch_tags=${ARCH_TAGS}" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push single-arch image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true' }}
+          tags: ${{ steps.meta.outputs.arch_tags }}
+          labels: |
+            org.opencontainers.image.title=yutto-uiya-${{ matrix.arch }}
+            org.opencontainers.image.description=yutto-uiya - bilibili video downloader with Streamlit WebUI (${{ matrix.arch }})
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.platform=${{ matrix.platform }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            TARGETPLATFORM=${{ matrix.platform }}
+            TARGETARCH=${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+  # 构建多架构通用镜像
+  build-multi-arch:
+    needs: [check-tag-branch, prepare-matrix, build-single-arch]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    if: needs.check-tag-branch.outputs.should-build == 'true' && needs.prepare-matrix.outputs.build-multi == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare-matrix.outputs.code-ref }}
+
+      - name: Check and create Dockerfile if needed
+        run: |
+          if [ ! -f "Dockerfile" ]; then
+            echo "❌ 未找到 Dockerfile，创建基础 Dockerfile..."
+            cat > Dockerfile << 'EOF'
+            FROM python:3.11-slim
+            RUN apt-get update && apt-get install -y ffmpeg git curl && rm -rf /var/lib/apt/lists/*
+            RUN pip install yutto streamlit
+            WORKDIR /app
+            COPY . .
+            RUN pip install -e . || echo "Install completed"
+            EXPOSE 8501
+            CMD ["streamlit", "run", "src/uiya/yutto_uiya.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+            EOF
+            echo "✅ 基础 Dockerfile 已创建"
+          fi
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          VERSION="${{ needs.prepare-matrix.outputs.actual-version }}"
+          SHORT_VERSION="${{ needs.prepare-matrix.outputs.short-version }}"
+
+          if [[ "$SHORT_VERSION" =~ ^v[0-9] ]]; then
+            SHORT_VERSION="${SHORT_VERSION#v}"
+          fi
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
+
+          IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          echo "image_name_lower=${IMAGE_NAME_LOWER}" >> $GITHUB_OUTPUT
+
+          # 生成多架构镜像标签
+          MULTI_TAGS="${REGISTRY}/${IMAGE_NAME_LOWER}:${SHORT_VERSION}"
+          MULTI_TAGS="${MULTI_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}:latest"
+
+          if [[ ! "${VERSION}" =~ (alpha|beta|rc|latest) ]]; then
+            MULTI_TAGS="${MULTI_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}:stable"
+          fi
+
+          echo "multi_tags=${MULTI_TAGS}" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ needs.prepare-matrix.outputs.multi-platforms }}
+          push: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true' }}
+          tags: ${{ steps.meta.outputs.multi_tags }}
+          labels: |
+            org.opencontainers.image.title=yutto-uiya
+            org.opencontainers.image.description=yutto-uiya - bilibili video downloader with Streamlit WebUI
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          cache-from: |
+            type=gha,scope=amd
+            type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=multi
+
+  # 跳过构建的通知
+  skip-build:
+    needs: check-tag-branch
+    runs-on: ubuntu-latest
+    if: needs.check-tag-branch.outputs.should-build == 'false'
+
+    steps:
+      - name: Skip build notification
+        run: |
+          echo "## ⏭️ 跳过 Docker 镜像构建" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 跳过原因" >> $GITHUB_STEP_SUMMARY
+
+          TAG_BRANCH="${{ needs.check-tag-branch.outputs.tag-branch }}"
+          case "$TAG_BRANCH" in
+            "other")
+              echo "- ❌ **标签不在 dev 分支上**" >> $GITHUB_STEP_SUMMARY
+              echo "- 📝 只有在 dev 分支上的标签才会触发构建" >> $GITHUB_STEP_SUMMARY
+              ;;
+            "none")
+              echo "- ❌ **非标签推送事件**" >> $GITHUB_STEP_SUMMARY
+              echo "- 📝 只有推送标签 (v*.*.*) 才会触发构建" >> $GITHUB_STEP_SUMMARY
+              ;;
+            *)
+              echo "- ❌ **未知原因**" >> $GITHUB_STEP_SUMMARY
+              ;;
+          esac
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚀 如何触发构建" >> $GITHUB_STEP_SUMMARY
+          echo "#### 在 dev 分支创建标签" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "git checkout dev" >> $GITHUB_STEP_SUMMARY
+          echo "git tag v1.0.1" >> $GITHUB_STEP_SUMMARY
+          echo "git push origin v1.0.1" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  # 构建状态通知
+  notify:
+    needs: [check-tag-branch, prepare-matrix, build-single-arch, build-multi-arch]
+    runs-on: ubuntu-latest
+    if: always() && needs.check-tag-branch.outputs.should-build == 'true'
+
+    steps:
+      - name: Extract metadata
+        id: meta
+        run: |
+          VERSION="${{ needs.prepare-matrix.outputs.actual-version }}"
+          SHORT_VERSION="${{ needs.prepare-matrix.outputs.short-version }}"
+
+          if [[ "$SHORT_VERSION" =~ ^v[0-9] ]]; then
+            SHORT_VERSION="${SHORT_VERSION#v}"
+          fi
+
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             ARCH_INPUT="${{ github.event.inputs.architectures }}"
           else
             ARCH_INPUT="all"
           fi
 
-          echo "架构输入: $ARCH_INPUT"
-          echo "实际版本: ${{ steps.version-ref.outputs.actual_version }}"
-          echo "代码引用: ${{ steps.version-ref.outputs.code_ref }}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
+          echo "arch_input=${ARCH_INPUT}" >> $GITHUB_OUTPUT
 
-          # 设置构建矩阵
-          case "$ARCH_INPUT" in
+          IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          echo "image_name_lower=${IMAGE_NAME_LOWER}" >> $GITHUB_OUTPUT
+
+      - name: Success Summary
+        if: needs.build-single-arch.result == 'success' && (needs.build-multi-arch.result == 'success' || needs.build-multi-arch.result == 'skipped')
+        run: |
+          echo "## ✅ Docker 镜像构建成功！" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🏗️ 构建信息" >> $GITHUB_STEP_SUMMARY
+          echo "- **版本**: ${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **架构**: ${{ steps.meta.outputs.arch_input }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **代码引用**: ${{ needs.prepare-matrix.outputs.code-ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **触发方式**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 构建的镜像" >> $GITHUB_STEP_SUMMARY
+
+          case "${{ steps.meta.outputs.arch_input }}" in
             "amd64")
-              MATRIX='[{"platform":"linux/amd64","arch":"amd"}]'
-              BUILD_MULTI="false"
-              MULTI_PLATFORMS="linux/amd64"
+              echo "- **AMD64**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-amd:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
               ;;
             "arm64")
-              MATRIX='[{"platform":"linux/arm64","arch":"arm64"}]'
-              BUILD_MULTI="false"
-              MULTI_PLATFORMS="linux/arm64"
-              ;;
-            "amd64,arm64"|"all"|"")
-              MATRIX='[{"platform":"linux/amd64","arch":"amd"},{"platform":"linux/arm64","arch":"arm64"}]'
-              BUILD_MULTI="true"
-              MULTI_PLATFORMS="linux/amd64,linux/arm64"
+              echo "- **ARM64**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-arm64:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
               ;;
             *)
-              echo "不支持的架构: $ARCH_INPUT，使用默认"
-              MATRIX='[{"platform":"linux/amd64","arch":"amd"},{"platform":"linux/arm64","arch":"arm64"}]'
-              BUILD_MULTI="true"
-              MULTI_PLATFORMS="linux/amd64,linux/arm64"
+              echo "- **多架构**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
+              echo "- **AMD64**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-amd:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
+              echo "- **ARM64**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-arm64:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
               ;;
           esac
 
-          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "build-multi=$BUILD_MULTI" >> $GITHUB_OUTPUT
-          echo "multi-platforms=$MULTI_PLATFORMS" >> $GITHUB_OUTPUT
-
-# 构建单架构镜像
-build-single-arch:
-  needs: [check-tag-branch, prepare-matrix]
-  runs-on: ubuntu-latest
-  permissions:
-    contents: read
-    packages: write
-  if: needs.check-tag-branch.outputs.should-build == 'true'
-  strategy:
-    matrix:
-      include: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
-
-  steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        ref: ${{ needs.prepare-matrix.outputs.code-ref }}
-
-    - name: Check and create Dockerfile if needed
-      run: |
-        echo "🔍 检查 Dockerfile..."
-        if [ ! -f "Dockerfile" ]; then
-          echo "❌ 未找到 Dockerfile，创建基础 Dockerfile..."
-
-          cat > Dockerfile << 'EOF'
-          FROM python:3.11-slim
-
-          LABEL maintainer="auto-generated" \
-          description="yutto-uiya with auto-updating yutto"
-
-          ARG VERSION=latest
-          ARG BUILD_DATE
-          ARG TARGETPLATFORM
-          ARG TARGETARCH
-
-          ENV PYTHONUNBUFFERED=1 \
-          PYTHONDONTWRITEBYTECODE=1 \
-          PIP_NO_CACHE_DIR=1 \
-          VERSION=${VERSION} \
-          YUTTO_AUTO_UPDATE=true \
-          YUTTO_UPDATE_INTERVAL=3600
-
-          RUN apt-get update && apt-get install -y \
-            ffmpeg git curl supervisor procps \
-            && rm -rf /var/lib/apt/lists/*
-
-          RUN pip install yutto streamlit uv
-
-          RUN groupadd -r yutto && useradd -r -g yutto yutto
-
-          WORKDIR /app
-          COPY . .
-
-          RUN uv sync || pip install -e . || echo "Dependencies installed"
-
-          RUN cat > /usr/local/bin/yutto-updater.sh << 'UPDATER_SCRIPT'
-          #!/bin/bash
-          LOG_FILE="/var/log/yutto-updater.log"
-          UPDATE_INTERVAL=${YUTTO_UPDATE_INTERVAL:-3600}
-
-          log_message() {
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
-          }
-
-          update_yutto() {
-            if [ "${YUTTO_AUTO_UPDATE:-true}" != "true" ]; then
-              return
-              fi
-
-            if pgrep -f "yutto" > /dev/null; then
-              log_message "yutto 进程运行中，跳过更新"
-              return
-            fi
-
-            local current=$(pip show yutto 2>/dev/null | grep "Version:" | cut -d' ' -f2 || echo "unknown")
-            local latest=$(pip index versions yutto 2>/dev/null | head -n1 | awk '{print $2}' || echo "unknown")
-
-            if [ "$current" != "$latest" ] && [ "$latest" != "unknown" ]; then
-              log_message "更新 yutto: $current -> $latest"
-              pip install --upgrade yutto && log_message "更新成功" || log_message "更新失败"
-            fi
-          }
-
-          log_message "yutto 更新守护程序启动"
-          while true; do
-            update_yutto
-            sleep $UPDATE_INTERVAL
-          done
-          UPDATER_SCRIPT
-
-          RUN mkdir -p /etc/supervisor/conf.d /var/log && \
-          chmod +x /usr/local/bin/yutto-updater.sh
-
-          RUN cat > /etc/supervisor/conf.d/services.conf << 'SUPERVISOR_CONF'
-          [program:yutto-updater]
-          command=/bin/bash /usr/local/bin/yutto-updater.sh
-          user=yutto
-          autostart=true
-          autorestart=true
-          stdout_logfile=/var/log/yutto-updater.log
-
-          [program:streamlit]
-          command=streamlit run src/uiya/yutto_uiya.py --server.address 0.0.0.0 --server.port 8501
-          directory=/app
-          user=yutto
-          autostart=true
-          autorestart=true
-          stdout_logfile=/var/log/streamlit.log
-          environment=PYTHONPATH=/app:/app/src
-          SUPERVISOR_CONF
-
-          RUN chown -R yutto:yutto /app /var/log
-
-          EXPOSE 8501
-          ENV TZ=Asia/Shanghai
-
-          HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-          CMD curl -f http://localhost:8501/_stcore/health || exit 1
-
-          CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]
-          EOF
-
-          echo "✅ 基础 Dockerfile 已创建"
-        else
-          echo "✅ 发现现有的 Dockerfile"
-        fi
-
-    - name: Extract metadata
-      id: meta
-      run: |
-        VERSION="${{ needs.prepare-matrix.outputs.actual-version }}"
-        SHORT_VERSION="${{ needs.prepare-matrix.outputs.short-version }}"
-
-        if [[ "$SHORT_VERSION" =~ ^v[0-9] ]]; then
-          SHORT_VERSION="${SHORT_VERSION#v}"
-        fi
-
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
-        echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
-
-        IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
-        echo "image_name_lower=${IMAGE_NAME_LOWER}" >> $GITHUB_OUTPUT
-
-        # 生成标签
-        ARCH_TAGS="${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:${SHORT_VERSION}"
-        ARCH_TAGS="${ARCH_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:latest"
-
-        if [[ ! "${VERSION}" =~ (alpha|beta|rc|latest) ]]; then
-          ARCH_TAGS="${ARCH_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:stable"
-        fi
-
-        echo "arch_tags=${ARCH_TAGS}" >> $GITHUB_OUTPUT
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to GitHub Container Registry
-      if: github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true'
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Build and push single-arch image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile
-        platforms: ${{ matrix.platform }}
-        push: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true' }}
-        tags: ${{ steps.meta.outputs.arch_tags }}
-        labels: |
-          org.opencontainers.image.title=yutto-uiya-${{ matrix.arch }}
-          org.opencontainers.image.description=yutto-uiya - bilibili video downloader with Streamlit WebUI (${{ matrix.arch }})
-          org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
-          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-          org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
-          org.opencontainers.image.revision=${{ github.sha }}
-          org.opencontainers.image.licenses=MIT
-          org.opencontainers.image.platform=${{ matrix.platform }}
-        build-args: |
-          VERSION=${{ steps.meta.outputs.version }}
-          BUILD_DATE=${{ github.event.head_commit.timestamp }}
-          TARGETPLATFORM=${{ matrix.platform }}
-          TARGETARCH=${{ matrix.arch }}
-        cache-from: type=gha,scope=${{ matrix.arch }}
-        cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
-
-# 构建多架构通用镜像
-build-multi-arch:
-  needs: [check-tag-branch, prepare-matrix, build-single-arch]
-  runs-on: ubuntu-latest
-  permissions:
-    contents: read
-    packages: write
-  if: needs.check-tag-branch.outputs.should-build == 'true' && needs.prepare-matrix.outputs.build-multi == 'true'
-
-  steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        ref: ${{ needs.prepare-matrix.outputs.code-ref }}
-
-    - name: Check and create Dockerfile if needed
-      run: |
-        if [ ! -f "Dockerfile" ]; then
-          echo "❌ 未找到 Dockerfile，创建基础 Dockerfile..."
-          cat > Dockerfile << 'EOF'
-          FROM python:3.11-slim
-          RUN apt-get update && apt-get install -y ffmpeg git curl && rm -rf /var/lib/apt/lists/*
-          RUN pip install yutto streamlit
-          WORKDIR /app
-          COPY . .
-          RUN pip install -e . || echo "Install completed"
-          EXPOSE 8501
-          CMD ["streamlit", "run", "src/uiya/yutto_uiya.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
-          EOF
-          echo "✅ 基础 Dockerfile 已创建"
-        fi
-
-    - name: Extract metadata
-      id: meta
-      run: |
-        VERSION="${{ needs.prepare-matrix.outputs.actual-version }}"
-        SHORT_VERSION="${{ needs.prepare-matrix.outputs.short-version }}"
-
-        if [[ "$SHORT_VERSION" =~ ^v[0-9] ]]; then
-          SHORT_VERSION="${SHORT_VERSION#v}"
-        fi
-
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
-        echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
-
-        IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
-        echo "image_name_lower=${IMAGE_NAME_LOWER}" >> $GITHUB_OUTPUT
-
-        # 生成多架构镜像标签
-        MULTI_TAGS="${REGISTRY}/${IMAGE_NAME_LOWER}:${SHORT_VERSION}"
-        MULTI_TAGS="${MULTI_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}:latest"
-
-        if [[ ! "${VERSION}" =~ (alpha|beta|rc|latest) ]]; then
-          MULTI_TAGS="${MULTI_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}:stable"
-        fi
-
-        echo "multi_tags=${MULTI_TAGS}" >> $GITHUB_OUTPUT
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to GitHub Container Registry
-      if: github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true'
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Build and push multi-arch image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile
-        platforms: ${{ needs.prepare-matrix.outputs.multi-platforms }}
-        push: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true' }}
-        tags: ${{ steps.meta.outputs.multi_tags }}
-        labels: |
-          org.opencontainers.image.title=yutto-uiya
-          org.opencontainers.image.description=yutto-uiya - bilibili video downloader with Streamlit WebUI
-          org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
-          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-          org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
-          org.opencontainers.image.revision=${{ github.sha }}
-          org.opencontainers.image.licenses=MIT
-        build-args: |
-          VERSION=${{ steps.meta.outputs.version }}
-          BUILD_DATE=${{ github.event.head_commit.timestamp }}
-        cache-from: |
-          type=gha,scope=amd
-          type=gha,scope=arm64
-        cache-to: type=gha,mode=max,scope=multi
-
-# 跳过构建的通知
-skip-build:
-  needs: check-tag-branch
-  runs-on: ubuntu-latest
-  if: needs.check-tag-branch.outputs.should-build == 'false'
-
-  steps:
-    - name: Skip build notification
-      run: |
-        echo "## ⏭️ 跳过 Docker 镜像构建" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📋 跳过原因" >> $GITHUB_STEP_SUMMARY
-
-        TAG_BRANCH="${{ needs.check-tag-branch.outputs.tag-branch }}"
-        case "$TAG_BRANCH" in
-          "other")
-            echo "- ❌ **标签不在 dev 分支上**" >> $GITHUB_STEP_SUMMARY
-            echo "- 📝 只有在 dev 分支上的标签才会触发构建" >> $GITHUB_STEP_SUMMARY
-            ;;
-          "none")
-            echo "- ❌ **非标签推送事件**" >> $GITHUB_STEP_SUMMARY
-            echo "- 📝 只有推送标签 (v*.*.*) 才会触发构建" >> $GITHUB_STEP_SUMMARY
-            ;;
-          *)
-            echo "- ❌ **未知原因**" >> $GITHUB_STEP_SUMMARY
-            ;;
-        esac
-
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🚀 如何触发构建" >> $GITHUB_STEP_SUMMARY
-        echo "#### 在 dev 分支创建标签" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-        echo "git checkout dev" >> $GITHUB_STEP_SUMMARY
-        echo "git tag v1.0.1" >> $GITHUB_STEP_SUMMARY
-        echo "git push origin v1.0.1" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-
-# 构建状态通知
-notify:
-  needs: [check-tag-branch, prepare-matrix, build-single-arch, build-multi-arch]
-  runs-on: ubuntu-latest
-  if: always() && needs.check-tag-branch.outputs.should-build == 'true'
-
-  steps:
-    - name: Extract metadata
-      id: meta
-      run: |
-        VERSION="${{ needs.prepare-matrix.outputs.actual-version }}"
-        SHORT_VERSION="${{ needs.prepare-matrix.outputs.short-version }}"
-
-        if [[ "$SHORT_VERSION" =~ ^v[0-9] ]]; then
-          SHORT_VERSION="${SHORT_VERSION#v}"
-        fi
-
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-          ARCH_INPUT="${{ github.event.inputs.architectures }}"
-        else
-          ARCH_INPUT="all"
-        fi
-
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
-        echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
-        echo "arch_input=${ARCH_INPUT}" >> $GITHUB_OUTPUT
-
-        IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
-        echo "image_name_lower=${IMAGE_NAME_LOWER}" >> $GITHUB_OUTPUT
-
-    - name: Success Summary
-      if: needs.build-single-arch.result == 'success' && (needs.build-multi-arch.result == 'success' || needs.build-multi-arch.result == 'skipped')
-      run: |
-        echo "## ✅ Docker 镜像构建成功！" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🏗️ 构建信息" >> $GITHUB_STEP_SUMMARY
-        echo "- **版本**: ${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **架构**: ${{ steps.meta.outputs.arch_input }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **代码引用**: ${{ needs.prepare-matrix.outputs.code-ref }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **触发方式**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📦 构建的镜像" >> $GITHUB_STEP_SUMMARY
-
-        case "${{ steps.meta.outputs.arch_input }}" in
-          "amd64")
-            echo "- **AMD64**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-amd:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
-            ;;
-          "arm64")
-            echo "- **ARM64**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-arm64:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
-            ;;
-          *)
-            echo "- **多架构**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
-            echo "- **AMD64**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-amd:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
-            echo "- **ARM64**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-arm64:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
-            ;;
-        esac
-
-    - name: Failure Summary
-      if: needs.build-single-arch.result == 'failure' || needs.build-multi-arch.result == 'failure'
-      run: |
-        echo "## ❌ Docker 镜像构建失败！" >> $GITHUB_STEP_SUMMARY
-        echo "请查看构建日志获取详细错误信息。" >> $GITHUB_STEP_SUMMARY
-        exit 1
+      - name: Failure Summary
+        if: needs.build-single-arch.result == 'failure' || needs.build-multi-arch.result == 'failure'
+        run: |
+          echo "## ❌ Docker 镜像构建失败！" >> $GITHUB_STEP_SUMMARY
+          echo "请查看构建日志获取详细错误信息。" >> $GITHUB_STEP_SUMMARY
+          exit 1
