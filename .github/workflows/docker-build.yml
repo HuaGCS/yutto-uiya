@@ -93,7 +93,74 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       build-multi: ${{ steps.set-matrix.outputs.build-multi }}
       multi-platforms: ${{ steps.set-matrix.outputs.multi-platforms }}
+      actual-version: ${{ steps.set-matrix.outputs.actual-version }}
+      code-ref: ${{ steps.set-matrix.outputs.code-ref }}
     steps:
+    - name: Checkout repository for tag detection
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取完整的 git 历史和所有标签
+
+    - name: Determine version and code reference
+      id: version-ref
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          VERSION_INPUT="${{ github.event.inputs.version }}"
+          USE_TAG_CODE="${{ github.event.inputs.use_tag_code }}"
+
+        if [[ "$USE_TAG_CODE" == "true" ]]; then
+            if [[ "$VERSION_INPUT" == "latest" ]]; then
+              # 获取最新的标签
+              LATEST_TAG=$(git tag -l 'v*.*.*' --sort=-version:refname | head -n1)
+              if [[ -n "$LATEST_TAG" ]]; then
+                ACTUAL_VERSION="$LATEST_TAG"
+                SHORT_VERSION="${LATEST_TAG#v}"
+                CODE_REF="$LATEST_TAG"
+                echo "🔍 latest + use_tag_code=true: 检测到最新标签 $LATEST_TAG，使用该标签代码"
+              else
+                echo "❌ 未找到任何版本标签，回退到 dev 分支"
+                ACTUAL_VERSION="latest"
+                SHORT_VERSION="latest"
+                CODE_REF="dev"
+              fi
+            else
+              # 使用指定版本的标签代码
+              TAG_NAME="v$VERSION_INPUT"
+              if git rev-parse --verify "$TAG_NAME" >/dev/null 2>&1; then
+                ACTUAL_VERSION="$TAG_NAME"
+                SHORT_VERSION="$VERSION_INPUT"
+                CODE_REF="$TAG_NAME"
+                echo "🏷️ 使用指定标签 $TAG_NAME 的代码"
+              else
+                echo "❌ 标签 $TAG_NAME 不存在，回退到 dev 分支代码"
+                ACTUAL_VERSION="v$VERSION_INPUT"
+                SHORT_VERSION="$VERSION_INPUT"
+                CODE_REF="dev"
+              fi
+            fi
+          else
+            # 使用 dev 分支最新代码
+            ACTUAL_VERSION="$VERSION_INPUT"
+            if [[ "$VERSION_INPUT" != "latest" ]]; then
+              SHORT_VERSION="$VERSION_INPUT"
+            else
+              SHORT_VERSION="latest"
+            fi
+            CODE_REF="dev"
+            echo "🔧 使用 dev 分支最新代码，镜像标签: $VERSION_INPUT"
+          fi
+        else
+          # 标签触发 - 使用标签对应的代码
+          ACTUAL_VERSION="${GITHUB_REF#refs/tags/}"
+          SHORT_VERSION="${ACTUAL_VERSION#v}"
+          CODE_REF="${ACTUAL_VERSION}"
+          echo "🏷️ 标签触发，使用标签代码: $ACTUAL_VERSION"
+        fi
+
+        echo "actual_version=${ACTUAL_VERSION}" >> $GITHUB_OUTPUT
+        echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
+        echo "code_ref=${CODE_REF}" >> $GITHUB_OUTPUT
+
     - name: Set build matrix
       id: set-matrix
       run: |
@@ -105,6 +172,8 @@ jobs:
         fi
 
         echo "架构输入: $ARCH_INPUT"
+        echo "实际版本: ${{ steps.version-ref.outputs.actual_version }}"
+        echo "代码引用: ${{ steps.version-ref.outputs.code_ref }}"
 
         # 根据输入设置构建矩阵
         case "$ARCH_INPUT" in
@@ -138,6 +207,8 @@ jobs:
         echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
         echo "build-multi=$BUILD_MULTI" >> $GITHUB_OUTPUT
         echo "multi-platforms=$MULTI_PLATFORMS" >> $GITHUB_OUTPUT
+        echo "actual-version=${{ steps.version-ref.outputs.actual_version }}" >> $GITHUB_OUTPUT
+        echo "code-ref=${{ steps.version-ref.outputs.code_ref }}" >> $GITHUB_OUTPUT
 
   # 构建单架构镜像
   build-single-arch:
@@ -155,34 +226,32 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取完整的 git 历史和标签
+        ref: ${{ needs.prepare-matrix.outputs.code-ref }}
 
     - name: Extract metadata
       id: meta
       run: |
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-          # 手动触发
-          VERSION="${{ github.event.inputs.version }}"
-          USE_TAG_CODE="${{ github.event.inputs.use_tag_code }}"
-          if [[ "$VERSION" != "latest" ]]; then
-            SHORT_VERSION="$VERSION"
-          else
-            SHORT_VERSION="latest"
-          fi
+        # 使用 prepare-matrix 阶段确定的版本信息
+        VERSION="${{ needs.prepare-matrix.outputs.actual-version }}"
+        SHORT_VERSION="${{ needs.prepare-matrix.outputs.actual-version }}"
 
-          if [[ "$USE_TAG_CODE" == "true" && "$VERSION" != "latest" ]]; then
-            echo "🔧 手动触发构建，版本: $VERSION (使用标签 v$VERSION 的代码)"
-          else
-            echo "🔧 手动触发构建，版本: $VERSION (使用 dev 分支最新代码)"
-          fi
-        else
-          # 标签触发
-          VERSION=${GITHUB_REF#refs/tags/}
-          SHORT_VERSION=${VERSION#v}
-          echo "🏷️ 标签触发构建，版本: $VERSION (使用标签对应代码)"
+        # 如果版本以 v 开头，去掉 v
+        if [[ "$SHORT_VERSION" =~ ^v[0-9] ]]; then
+          SHORT_VERSION="${SHORT_VERSION#v}"
         fi
 
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
         echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
+        echo "code_ref=${{ needs.prepare-matrix.outputs.code-ref }}" >> $GITHUB_OUTPUT
+
+        # 显示构建信息
+        echo "🏗️ 构建信息:"
+        echo "   版本: ${VERSION}"
+        echo "   短版本: ${SHORT_VERSION}"
+        echo "   代码引用: ${{ needs.prepare-matrix.outputs.code-ref }}"
+        echo "   架构: ${{ matrix.arch }}"
 
         # 转换为小写（GitHub Container Registry 要求）
         IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
@@ -191,7 +260,7 @@ jobs:
         # 生成单架构镜像标签
         ARCH_TAGS="${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:${SHORT_VERSION}"
 
-        # 总是添加 latest 标签（因为只有标签推送才会触发）
+        # 总是添加 latest 标签（因为只有标签推送或手动触发才会到这里）
         ARCH_TAGS="${ARCH_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:latest"
 
         # 如果是稳定版本，添加 stable 标签
@@ -254,26 +323,26 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取完整的 git 历史和标签
+        ref: ${{ needs.prepare-matrix.outputs.code-ref }}
 
     - name: Extract metadata
       id: meta
       run: |
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-          # 手动触发
-          VERSION="${{ github.event.inputs.version }}"
-          if [[ "$VERSION" != "latest" ]]; then
-            SHORT_VERSION="$VERSION"
-          else
-            SHORT_VERSION="latest"
-          fi
-        else
-          # 标签触发
-          VERSION=${GITHUB_REF#refs/tags/}
-          SHORT_VERSION=${VERSION#v}
-        fi
+        # 使用 prepare-matrix 阶段确定的版本信息
+        VERSION="${{ needs.prepare-matrix.outputs.actual-version }}"
+        SHORT_VERSION="${{ needs.prepare-matrix.outputs.short-version }}"
 
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
         echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
+        echo "code_ref=${{ needs.prepare-matrix.outputs.code-ref }}" >> $GITHUB_OUTPUT
+
+        # 显示构建信息
+        echo "🏗️ 多架构构建信息:"
+        echo "   版本: ${VERSION}"
+        echo "   短版本: ${SHORT_VERSION}"
+        echo "   代码引用: ${{ needs.prepare-matrix.outputs.code-ref }}"
 
         # 转换为小写
         IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
