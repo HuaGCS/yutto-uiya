@@ -1,7 +1,5 @@
 name: Build and Push to GitHub Container Registry
 
-name: Build and Push to GitHub Container Registry
-
 on:
   push:
     tags:
@@ -12,6 +10,10 @@ on:
         description: '版本号 (例如: 1.1.4 或 latest)'
         required: true
         default: 'latest'
+      use_tag_code:
+        description: '使用对应标签的代码构建'
+        type: boolean
+        default: false
       push_to_registry:
         description: '是否推送到镜像仓库'
         type: boolean
@@ -43,6 +45,24 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0  # 获取完整的 git 历史
+        ref: |
+          ${{
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.use_tag_code == 'true' &&
+            github.event.inputs.version != 'latest'
+            && format('v{0}', github.event.inputs.version)
+            || 'dev'
+          }}
+      with:
+        fetch-depth: 0  # 获取完整的 git 历史
+        ref: |
+          ${{
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.use_tag_code == 'true' &&
+            github.event.inputs.version != 'latest'
+            && format('v{0}', github.event.inputs.version)
+            || 'dev'
+          }}
 
     - name: Check if tag is on dev branch
       id: check
@@ -152,17 +172,23 @@ jobs:
         if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
           # 手动触发
           VERSION="${{ github.event.inputs.version }}"
+          USE_TAG_CODE="${{ github.event.inputs.use_tag_code }}"
           if [[ "$VERSION" != "latest" ]]; then
             SHORT_VERSION="$VERSION"
           else
             SHORT_VERSION="latest"
           fi
-          echo "🔧 手动触发构建，版本: $VERSION"
+
+          if [[ "$USE_TAG_CODE" == "true" && "$VERSION" != "latest" ]]; then
+            echo "🔧 手动触发构建，版本: $VERSION (使用标签 v$VERSION 的代码)"
+          else
+            echo "🔧 手动触发构建，版本: $VERSION (使用 dev 分支最新代码)"
+          fi
         else
           # 标签触发
           VERSION=${GITHUB_REF#refs/tags/}
           SHORT_VERSION=${VERSION#v}
-          echo "🏷️ 标签触发构建，版本: $VERSION"
+          echo "🏷️ 标签触发构建，版本: $VERSION (使用标签对应代码)"
         fi
 
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
