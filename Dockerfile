@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 配置 pip 使用国内镜像源（可选，国内用户推荐）
-RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+#RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 安装 uv 包管理器
 RUN pip install uv
