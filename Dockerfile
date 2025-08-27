@@ -31,7 +31,7 @@ WORKDIR /app
 COPY . .
 
 # 如果在国内，修改 pyproject.toml 使用国内源
-RUN #if [ -f pyproject.toml ]; then \
+#RUN if [ -f pyproject.toml ]; then \
 #        sed -i 's|python-install-mirror = "https://github.com/astral-sh/python-build-standalone/releases/download"|python-install-mirror = "https://mirror.nju.edu.cn/github-release/indygreg/python-build-standalone/"|g' pyproject.toml && \
 #        sed -i 's|# name = "tsinghua"|name = "tsinghua"|g' pyproject.toml && \
 #        sed -i 's|# url = "https://pypi.tuna.tsinghua.edu.cn/simple"|url = "https://pypi.tuna.tsinghua.edu.cn/simple"|g' pyproject.toml && \
