@@ -30,6 +30,19 @@ WORKDIR /app
 # 复制项目文件
 COPY . .
 
+# 创建非 root 用户
+RUN groupadd -r yutto && useradd -r -g yutto yutto
+
+# 创建必要的目录，包括 uv 缓存目录
+RUN mkdir -p /app/downloads /app/config /home/yutto/.cache/uv && \
+    chown -R yutto:yutto /app /home/yutto
+
+# 先安装 yutto 核心库（这是 yutto-uiya 的基础依赖）
+RUN pip install yutto
+
+# 切换到非 root 用户
+USER yutto
+
 # 如果在国内，修改 pyproject.toml 使用国内源
 #RUN if [ -f pyproject.toml ]; then \
 #        sed -i 's|python-install-mirror = "https://github.com/astral-sh/python-build-standalone/releases/download"|python-install-mirror = "https://mirror.nju.edu.cn/github-release/indygreg/python-build-standalone/"|g' pyproject.toml && \
@@ -41,9 +54,6 @@ COPY . .
 #        sed -i 's|default= true|# default= true|g' pyproject.toml; \
 #    fi
 
-# 先安装 yutto 核心库（这是 yutto-uiya 的基础依赖）
-RUN pip install yutto
-
 # 使用 uv 安装项目依赖
 # 如果项目有 pyproject.toml，uv 会自动处理依赖关系
 RUN uv lock || echo "Lock file generation failed, continuing..." && \
@@ -52,16 +62,6 @@ RUN uv lock || echo "Lock file generation failed, continuing..." && \
 
 # 确保必要的依赖都已安装
 RUN pip install streamlit yutto
-
-# 创建非 root 用户
-RUN groupadd -r yutto && useradd -r -g yutto yutto
-
-# 创建必要的目录
-RUN mkdir -p /app/downloads /app/config && \
-    chown -R yutto:yutto /app
-
-# 切换到非 root 用户
-USER yutto
 
 # 暴露端口
 EXPOSE 8501
