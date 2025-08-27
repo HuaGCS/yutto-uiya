@@ -1,11 +1,11 @@
 name: Build and Push to GitHub Container Registry
 
+name: Build and Push to GitHub Container Registry
+
 on:
   push:
     tags:
-      - 'v*.*.*'  # 匹配 v1.1.4 格式的标签
-    branches:
-      - dev       # dev 分支推送时构建测试镜像
+      - 'v*.*.*'  # 仅在推送 v1.1.4 格式的标签时触发构建
   workflow_dispatch:  # 允许手动触发
     inputs:
       version:
@@ -16,25 +16,131 @@ on:
         description: '是否推送到镜像仓库'
         type: boolean
         default: true
+      architectures:
+        description: '构建架构 (可选: amd64, arm64, all)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - 'all'
+          - 'amd64'
+          - 'arm64'
+          - 'amd64,arm64'
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/yutto-uiya
 
 jobs:
+  # 检查标签是否在 dev 分支上
+  check-tag-branch:
+    runs-on: ubuntu-latest
+    outputs:
+      should-build: ${{ steps.check.outputs.should-build }}
+      tag-branch: ${{ steps.check.outputs.tag-branch }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取完整的 git 历史
+
+    - name: Check if tag is on dev branch
+      id: check
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          # 手动触发总是允许构建
+          echo "should-build=true" >> $GITHUB_OUTPUT
+          echo "tag-branch=manual" >> $GITHUB_OUTPUT
+          echo "✅ 手动触发构建"
+        elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "🏷️ 检查标签: $TAG_NAME"
+
+          # 检查标签是否在 dev 分支上
+          if git merge-base --is-ancestor ${{ github.sha }} origin/dev; then
+            echo "✅ 标签 $TAG_NAME 在 dev 分支上，允许构建"
+            echo "should-build=true" >> $GITHUB_OUTPUT
+            echo "tag-branch=dev" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 标签 $TAG_NAME 不在 dev 分支上，跳过构建"
+            echo "should-build=false" >> $GITHUB_OUTPUT
+            echo "tag-branch=other" >> $GITHUB_OUTPUT
+          fi
+        else
+          # 其他情况（如分支推送）不构建
+          echo "❌ 非标签推送，跳过构建"
+          echo "should-build=false" >> $GITHUB_OUTPUT
+          echo "tag-branch=none" >> $GITHUB_OUTPUT
+        fi
+
+  # 准备构建矩阵
+  prepare-matrix:
+    needs: check-tag-branch
+    runs-on: ubuntu-latest
+    # 只有在需要构建时才运行
+    if: needs.check-tag-branch.outputs.should-build == 'true'
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      build-multi: ${{ steps.set-matrix.outputs.build-multi }}
+      multi-platforms: ${{ steps.set-matrix.outputs.multi-platforms }}
+    steps:
+    - name: Set build matrix
+      id: set-matrix
+      run: |
+        # 确定要构建的架构
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          ARCH_INPUT="${{ github.event.inputs.architectures }}"
+        else
+          ARCH_INPUT="all"
+        fi
+
+        echo "架构输入: $ARCH_INPUT"
+
+        # 根据输入设置构建矩阵
+        case "$ARCH_INPUT" in
+          "amd64")
+            MATRIX='[{"platform":"linux/amd64","arch":"amd"}]'
+            BUILD_MULTI="false"
+            MULTI_PLATFORMS="linux/amd64"
+            ;;
+          "arm64")
+            MATRIX='[{"platform":"linux/arm64","arch":"arm64"}]'
+            BUILD_MULTI="false"
+            MULTI_PLATFORMS="linux/arm64"
+            ;;
+          "amd64,arm64"|"all"|"")
+            MATRIX='[{"platform":"linux/amd64","arch":"amd"},{"platform":"linux/arm64","arch":"arm64"}]'
+            BUILD_MULTI="true"
+            MULTI_PLATFORMS="linux/amd64,linux/arm64"
+            ;;
+          *)
+            echo "不支持的架构: $ARCH_INPUT，使用默认的所有架构"
+            MATRIX='[{"platform":"linux/amd64","arch":"amd"},{"platform":"linux/arm64","arch":"arm64"}]'
+            BUILD_MULTI="true"
+            MULTI_PLATFORMS="linux/amd64,linux/arm64"
+            ;;
+        esac
+
+        echo "构建矩阵: $MATRIX"
+        echo "构建多架构: $BUILD_MULTI"
+        echo "多架构平台: $MULTI_PLATFORMS"
+
+        echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+        echo "build-multi=$BUILD_MULTI" >> $GITHUB_OUTPUT
+        echo "multi-platforms=$MULTI_PLATFORMS" >> $GITHUB_OUTPUT
+
   # 构建单架构镜像
   build-single-arch:
+    needs: [check-tag-branch, prepare-matrix]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    # 只有在需要构建时才运行
+    if: needs.check-tag-branch.outputs.should-build == 'true'
     strategy:
       matrix:
-        include:
-          - platform: linux/amd64
-            arch: amd
-          - platform: linux/arm64
-            arch: arm64
+        include: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
 
     steps:
     - name: Checkout repository
@@ -51,14 +157,12 @@ jobs:
           else
             SHORT_VERSION="latest"
           fi
-        elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/dev" ]]; then
-          # dev 分支推送，使用 dev 标签
-          VERSION="dev"
-          SHORT_VERSION="dev"
+          echo "🔧 手动触发构建，版本: $VERSION"
         else
           # 标签触发
           VERSION=${GITHUB_REF#refs/tags/}
           SHORT_VERSION=${VERSION#v}
+          echo "🏷️ 标签触发构建，版本: $VERSION"
         fi
 
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
@@ -71,13 +175,11 @@ jobs:
         # 生成单架构镜像标签
         ARCH_TAGS="${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:${SHORT_VERSION}"
 
-        # 只有在非 dev 分支时才添加 latest 标签
-        if [[ "${SHORT_VERSION}" != "dev" ]]; then
-          ARCH_TAGS="${ARCH_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:latest"
-        fi
+        # 总是添加 latest 标签（因为只有标签推送才会触发）
+        ARCH_TAGS="${ARCH_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:latest"
 
         # 如果是稳定版本，添加 stable 标签
-        if [[ ! "${VERSION}" =~ (alpha|beta|rc|latest|dev) ]]; then
+        if [[ ! "${VERSION}" =~ (alpha|beta|rc|latest) ]]; then
           ARCH_TAGS="${ARCH_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}-${{ matrix.arch }}:stable"
         fi
 
@@ -125,11 +227,13 @@ jobs:
 
   # 构建多架构通用镜像
   build-multi-arch:
-    needs: build-single-arch
+    needs: [check-tag-branch, prepare-matrix, build-single-arch]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    # 只有在需要构建且为多架构时才运行
+    if: needs.check-tag-branch.outputs.should-build == 'true' && needs.prepare-matrix.outputs.build-multi == 'true'
 
     steps:
     - name: Checkout repository
@@ -146,10 +250,6 @@ jobs:
           else
             SHORT_VERSION="latest"
           fi
-        elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/dev" ]]; then
-          # dev 分支推送，使用 dev 标签
-          VERSION="dev"
-          SHORT_VERSION="dev"
         else
           # 标签触发
           VERSION=${GITHUB_REF#refs/tags/}
@@ -165,14 +265,10 @@ jobs:
 
         # 生成多架构镜像标签
         MULTI_TAGS="${REGISTRY}/${IMAGE_NAME_LOWER}:${SHORT_VERSION}"
-
-        # 只有在非 dev 分支时才添加 latest 标签
-        if [[ "${SHORT_VERSION}" != "dev" ]]; then
-          MULTI_TAGS="${MULTI_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}:latest"
-        fi
+        MULTI_TAGS="${MULTI_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}:latest"
 
         # 如果是稳定版本，添加 stable 标签
-        if [[ ! "${VERSION}" =~ (alpha|beta|rc|latest|dev) ]]; then
+        if [[ ! "${VERSION}" =~ (alpha|beta|rc|latest) ]]; then
           MULTI_TAGS="${MULTI_TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}:stable"
         fi
 
@@ -197,7 +293,7 @@ jobs:
       with:
         context: .
         file: ./Dockerfile
-        platforms: linux/amd64,linux/arm64
+        platforms: ${{ needs.prepare-matrix.outputs.multi-platforms }}
         push: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_registry == 'true' }}
         tags: ${{ steps.meta.outputs.multi_tags }}
         labels: |
@@ -217,46 +313,126 @@ jobs:
           type=gha,scope=arm64
         cache-to: type=gha,mode=max,scope=multi
 
-  # 构建状态通知
-  notify:
-    needs: [build-single-arch, build-multi-arch]
+  # 跳过构建的通知
+  skip-build:
+    needs: check-tag-branch
     runs-on: ubuntu-latest
-    if: always()
+    if: needs.check-tag-branch.outputs.should-build == 'false'
 
     steps:
+    - name: Skip build notification
+      run: |
+        echo "## ⏭️ 跳过 Docker 镜像构建" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 跳过原因" >> $GITHUB_STEP_SUMMARY
+
+        TAG_BRANCH="${{ needs.check-tag-branch.outputs.tag-branch }}"
+        case "$TAG_BRANCH" in
+          "other")
+            echo "- ❌ **标签不在 dev 分支上**" >> $GITHUB_STEP_SUMMARY
+            echo "- 📝 只有在 dev 分支上的标签才会触发构建" >> $GITHUB_STEP_SUMMARY
+            echo "- 💡 请确保在 dev 分支上创建和推送标签" >> $GITHUB_STEP_SUMMARY
+            ;;
+          "none")
+            echo "- ❌ **非标签推送事件**" >> $GITHUB_STEP_SUMMARY
+            echo "- 📝 只有推送标签 (v*.*.*) 才会触发构建" >> $GITHUB_STEP_SUMMARY
+            echo "- 💡 普通的分支推送不会触发构建" >> $GITHUB_STEP_SUMMARY
+            ;;
+          *)
+            echo "- ❌ **未知原因**" >> $GITHUB_STEP_SUMMARY
+            ;;
+        esac
+
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🚀 如何触发构建" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "#### 方式 1: 在 dev 分支创建标签" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "git checkout dev" >> $GITHUB_STEP_SUMMARY
+        echo "git tag v1.0.1" >> $GITHUB_STEP_SUMMARY
+        echo "git push origin v1.0.1" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "#### 方式 2: 手动触发工作流" >> $GITHUB_STEP_SUMMARY
+        echo "- 在 Actions 页面点击 'Run workflow'" >> $GITHUB_STEP_SUMMARY
+        echo "- 选择版本号和架构进行构建" >> $GITHUB_STEP_SUMMARY
+
+  # 构建状态通知
+  notify:
+    needs: [check-tag-branch, prepare-matrix, build-single-arch]
+    runs-on: ubuntu-latest
+    if: always() && needs.check-tag-branch.outputs.should-build == 'true'
+
+    steps:
+    - name: Check multi-arch build status
+      id: check-multi
+      run: |
+        if [[ "${{ needs.prepare-matrix.outputs.build-multi }}" == "true" ]]; then
+          echo "multi_arch_needed=true" >> $GITHUB_OUTPUT
+          if [[ "${{ needs.build-multi-arch.result }}" == "success" ]] || [[ "${{ needs.build-multi-arch.result }}" == "skipped" ]]; then
+            echo "multi_arch_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "multi_arch_success=false" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "multi_arch_needed=false" >> $GITHUB_OUTPUT
+          echo "multi_arch_success=true" >> $GITHUB_OUTPUT
+        fi
+
     - name: Extract metadata
       id: meta
       run: |
         if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
           VERSION="${{ github.event.inputs.version }}"
+          ARCH_INPUT="${{ github.event.inputs.architectures }}"
           if [[ "$VERSION" != "latest" ]]; then
             SHORT_VERSION="$VERSION"
           else
             SHORT_VERSION="latest"
           fi
-        elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/dev" ]]; then
-          VERSION="dev"
-          SHORT_VERSION="dev"
         else
           VERSION=${GITHUB_REF#refs/tags/}
           SHORT_VERSION=${VERSION#v}
+          ARCH_INPUT="all"
         fi
 
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
         echo "short_version=${SHORT_VERSION}" >> $GITHUB_OUTPUT
+        echo "arch_input=${ARCH_INPUT}" >> $GITHUB_OUTPUT
 
         IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
         echo "image_name_lower=${IMAGE_NAME_LOWER}" >> $GITHUB_OUTPUT
 
     - name: Success Summary
-      if: needs.build-single-arch.result == 'success' && needs.build-multi-arch.result == 'success'
+      if: needs.build-single-arch.result == 'success' && steps.check-multi.outputs.multi_arch_success == 'true'
       run: |
         echo "## ✅ Docker 镜像构建成功！" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🏗️ 构建信息" >> $GITHUB_STEP_SUMMARY
+        echo "- **版本**: ${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **架构**: ${{ steps.meta.outputs.arch_input }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **触发方式**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **标签分支**: ${{ needs.check-tag-branch.outputs.tag-branch }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **构建时间**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
         echo "### 📦 构建的镜像" >> $GITHUB_STEP_SUMMARY
-        echo "- **多架构镜像**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **AMD64 专用**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-amd:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **ARM64 专用**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-arm64:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
+
+        # 根据架构显示不同的镜像
+        case "${{ steps.meta.outputs.arch_input }}" in
+          "amd64")
+            echo "- **AMD64 专用**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-amd:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
+            ;;
+          "arm64")
+            echo "- **ARM64 专用**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-arm64:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
+            ;;
+          *)
+            echo "- **多架构镜像**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **AMD64 专用**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-amd:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **ARM64 专用**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-arm64:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
+            ;;
+        esac
+
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🔄 yutto 自动更新功能" >> $GITHUB_STEP_SUMMARY
         echo "- ✅ 镜像集成了 yutto 自动更新功能" >> $GITHUB_STEP_SUMMARY
@@ -265,22 +441,40 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🚀 使用方法" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-        echo "# 基础使用（默认启用自动更新）" >> $GITHUB_STEP_SUMMARY
-        echo "docker run -d -p 8501:8501 -v \$(pwd)/downloads:/app/downloads \\" >> $GITHUB_STEP_SUMMARY
-        echo "  ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}:${{ steps.meta.outputs.short_version }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "# 自定义更新策略" >> $GITHUB_STEP_SUMMARY
-        echo "docker run -d -p 8501:8501 \\" >> $GITHUB_STEP_SUMMARY
-        echo "  -v \$(pwd)/downloads:/app/downloads \\" >> $GITHUB_STEP_SUMMARY
-        echo "  -v \$(pwd)/logs:/var/log \\" >> $GITHUB_STEP_SUMMARY
-        echo "  -e YUTTO_AUTO_UPDATE=true \\" >> $GITHUB_STEP_SUMMARY
-        echo "  -e YUTTO_UPDATE_INTERVAL=3600 \\" >> $GITHUB_STEP_SUMMARY
-        echo "  ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}:${{ steps.meta.outputs.short_version }}" >> $GITHUB_STEP_SUMMARY
+
+        # 根据构建的架构提供相应的使用示例
+        case "${{ steps.meta.outputs.arch_input }}" in
+          "amd64")
+            echo "# 使用 AMD64 专用镜像" >> $GITHUB_STEP_SUMMARY
+            echo "docker run -d -p 8501:8501 -v \$(pwd)/downloads:/app/downloads \\" >> $GITHUB_STEP_SUMMARY
+            echo "  ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-amd:${{ steps.meta.outputs.short_version }}" >> $GITHUB_STEP_SUMMARY
+            ;;
+          "arm64")
+            echo "# 使用 ARM64 专用镜像" >> $GITHUB_STEP_SUMMARY
+            echo "docker run -d -p 8501:8501 -v \$(pwd)/downloads:/app/downloads \\" >> $GITHUB_STEP_SUMMARY
+            echo "  ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-arm64:${{ steps.meta.outputs.short_version }}" >> $GITHUB_STEP_SUMMARY
+            ;;
+          *)
+            echo "# 使用多架构镜像（推荐，Docker 自动选择合适架构）" >> $GITHUB_STEP_SUMMARY
+            echo "docker run -d -p 8501:8501 -v \$(pwd)/downloads:/app/downloads \\" >> $GITHUB_STEP_SUMMARY
+            echo "  ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}:${{ steps.meta.outputs.short_version }}" >> $GITHUB_STEP_SUMMARY
+            ;;
+        esac
+
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
     - name: Failure Summary
-      if: needs.build-single-arch.result == 'failure' || needs.build-multi-arch.result == 'failure'
+      if: needs.build-single-arch.result == 'failure' || steps.check-multi.outputs.multi_arch_success == 'false'
       run: |
         echo "## ❌ Docker 镜像构建失败！" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 构建信息" >> $GITHUB_STEP_SUMMARY
+        echo "- **版本**: ${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **架构**: ${{ steps.meta.outputs.arch_input }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **单架构构建**: ${{ needs.build-single-arch.result }}" >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ steps.check-multi.outputs.multi_arch_needed }}" == "true" ]]; then
+          echo "- **多架构构建**: ${{ needs.build-multi-arch.result }}" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
         echo "请查看上方的构建日志获取详细错误信息。" >> $GITHUB_STEP_SUMMARY
         exit 1
