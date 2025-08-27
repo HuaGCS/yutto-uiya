@@ -215,49 +215,151 @@ uv run streamlit run src/uiya/yutto_uiya.py
 -  [x] 简化安装步骤.
 -  [ ] 可增添的任务列表 / 按任务列表启动下载
 
-## 🐳 Docker 镜像
+## 🐳 Docker 镜像 (支持 yutto 自动更新)
 
-本项目通过 GitHub Actions 自动构建多架构 Docker 镜像并发布到 GitHub Container Registry。
+本项目通过 GitHub Actions 自动构建多架构 Docker 镜像，并集成了 yutto 自动更新功能。
 
-### 快速使用
+### ✨ 核心特性
+
+- 🔄 **智能自动更新**: yutto 在空闲时自动保持最新版本
+- 🛡️ **安全更新机制**: 只在没有下载任务时进行更新
+- 🌐 **多架构支持**: AMD64 和 ARM64 自动构建
+- 📊 **Web 界面集成**: 在 Streamlit 中显示版本和更新状态
+- 📝 **详细日志记录**: 完整的更新过程追踪
+
+### 🚀 快速开始
 
 ```bash
-# 使用多架构镜像（推荐）
-docker run -d --name yutto-uiya \
-  -p 8501:8501 \
-  -v $(pwd)/downloads:/app/downloads \
-  ghcr.io/HuaGCS/yutto-uiya:latest
+# 基础使用 (默认启用自动更新)
+docker run -d --name yutto-uiya \\
+-p 8501:8501 \\
+-v \$(pwd)/downloads:/app/downloads \\
+-v \$(pwd)/logs:/var/log \\
+ghcr.io/${username}/yutto-uiya:latest
 
 # 访问 Web 界面
 open http://localhost:8501
 ```
 
-### 可用镜像
+### 🔧 自定义配置
 
-- **稳定版本**：`ghcr.io/HuaGCS/yutto-uiya:latest`
-- **开发版本**：`ghcr.io/HuaGCS/yutto-uiya:dev`
-- **AMD64 专用**：`ghcr.io/HuaGCS/yutto-uiya-amd:latest`
-- **ARM64 专用**：`ghcr.io/HuaGCS/yutto-uiya-arm64:latest`
+```bash
+# 自定义更新策略
+docker run -d --name yutto-uiya \\
+-p 8501:8501 \\
+-v \$(pwd)/downloads:/app/downloads \\
+-v \$(pwd)/logs:/var/log \\
+-e YUTTO_AUTO_UPDATE=true \\
+-e YUTTO_UPDATE_INTERVAL=1800 \\
+-e YUTTO_IDLE_TIME=600 \\
+ghcr.io/${username}/yutto-uiya:latest
 
-### 构建状态
+# 禁用自动更新
+docker run -d --name yutto-uiya \\
+-p 8501:8501 \\
+-v \$(pwd)/downloads:/app/downloads \\
+-e YUTTO_AUTO_UPDATE=false \\
+ghcr.io/${username}/yutto-uiya:latest
+```
 
-![Docker Build](https://github.com/HuaGCS/yutto-uiya/actions/workflows/docker-build.yml/badge.svg)
+### 📦 可用镜像
 
-### Docker Compose
+| 镜像类型 | 标签 | 说明 |
+|----------|------|------|
+| **稳定版本** | `ghcr.io/${username}/yutto-uiya:latest` | 生产环境推荐 |
+| **开发版本** | `ghcr.io/${username}/yutto-uiya:dev` | 最新开发代码 |
+| **AMD64 专用** | `ghcr.io/${username}/yutto-uiya-amd:latest` | x86_64 处理器 |
+| **ARM64 专用** | `ghcr.io/${username}/yutto-uiya-arm64:latest` | ARM 处理器 |
+
+### ⚙️ 环境变量配置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `YUTTO_AUTO_UPDATE` | `true` | 是否启用自动更新 |
+| `YUTTO_UPDATE_INTERVAL` | `3600` | 检查更新间隔(秒) |
+| `YUTTO_IDLE_TIME` | `1800` | 空闲时间阈值(秒) |
+
+### 🐳 Docker Compose
 
 ```yaml
 version: '3.8'
 services:
-  yutto-uiya:
-    image: ghcr.io/HuaGCS/yutto-uiya:latest
-    container_name: yutto-uiya
-    ports:
-      - "8501:8501"
-    volumes:
-      - ./downloads:/app/downloads
-      - ./config:/app/config
-    environment:
-      - TZ=Asia/Shanghai
-    restart: unless-stopped
+yutto-uiya:
+image: ghcr.io/${username}/yutto-uiya:latest
+container_name: yutto-uiya
+ports:
+- "8501:8501"
+volumes:
+- ./downloads:/app/downloads
+- ./config:/app/config
+- ./logs:/var/log
+environment:
+- TZ=Asia/Shanghai
+- YUTTO_AUTO_UPDATE=true
+- YUTTO_UPDATE_INTERVAL=3600  # 1小时检查一次
+- YUTTO_IDLE_TIME=1800        # 30分钟空闲后更新
+restart: unless-stopped
 ```
+
+### 📊 监控和管理
+
+```bash
+# 查看更新日志
+docker exec -it yutto-uiya tail -f /var/log/yutto-updater.log
+
+# 查看服务状态
+docker exec -it yutto-uiya supervisorctl status
+
+# 手动更新 yutto
+docker exec -it yutto-uiya pip install --upgrade yutto
+
+# 重启更新服务
+docker exec -it yutto-uiya supervisorctl restart yutto-updater
+```
+
+### 🏷️ 构建触发机制
+
+![Docker Build](https://github.com/${username}/yutto-uiya/actions/workflows/docker-build.yml/badge.svg)
+
+**自动构建触发条件：**
+- ✅ 只有在 \`dev\` 分支上推送标签 (如 \`v1.1.4\`) 才会触发构建
+- ❌ 普通的分支提交不会触发构建
+- ✅ 支持手动触发，可选择特定架构
+
+**创建新版本的正确方法：**
+```bash
+# 确保在 dev 分支上
+git checkout dev
+
+# 创建并推送标签
+git tag v1.1.4 -m "Release version 1.1.4"
+git push origin v1.1.4
+
+# 工作流会自动检查标签是否在 dev 分支上，然后开始构建
+```
+
+### 📋 更新策略建议
+
+#### 生产环境
+```bash
+YUTTO_AUTO_UPDATE=true
+YUTTO_UPDATE_INTERVAL=86400  # 每日检查
+YUTTO_IDLE_TIME=3600         # 1小时空闲
+```
+
+#### 开发环境
+```bash
+YUTTO_AUTO_UPDATE=true
+YUTTO_UPDATE_INTERVAL=1800   # 30分钟检查
+YUTTO_IDLE_TIME=300          # 5分钟空闲
+```
+
+#### 关键业务
+```bash
+YUTTO_AUTO_UPDATE=false      # 手动控制更新时机
+```
+
+---
+
+通过智能的自动更新机制，您的 yutto 将始终保持最新版本，同时确保不会中断正在进行的下载任务！ 🎉
 
