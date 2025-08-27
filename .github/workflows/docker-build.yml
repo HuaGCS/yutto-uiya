@@ -258,9 +258,23 @@ jobs:
         echo "- **AMD64 专用**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-amd:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **ARM64 专用**: \`${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}-arm64:${{ steps.meta.outputs.short_version }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔄 yutto 自动更新功能" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ 镜像集成了 yutto 自动更新功能" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ 支持智能空闲检测和安全更新" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ 可通过环境变量控制更新策略" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🚀 使用方法" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "# 基础使用（默认启用自动更新）" >> $GITHUB_STEP_SUMMARY
         echo "docker run -d -p 8501:8501 -v \$(pwd)/downloads:/app/downloads \\" >> $GITHUB_STEP_SUMMARY
+        echo "  ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}:${{ steps.meta.outputs.short_version }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# 自定义更新策略" >> $GITHUB_STEP_SUMMARY
+        echo "docker run -d -p 8501:8501 \\" >> $GITHUB_STEP_SUMMARY
+        echo "  -v \$(pwd)/downloads:/app/downloads \\" >> $GITHUB_STEP_SUMMARY
+        echo "  -v \$(pwd)/logs:/var/log \\" >> $GITHUB_STEP_SUMMARY
+        echo "  -e YUTTO_AUTO_UPDATE=true \\" >> $GITHUB_STEP_SUMMARY
+        echo "  -e YUTTO_UPDATE_INTERVAL=3600 \\" >> $GITHUB_STEP_SUMMARY
         echo "  ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name_lower }}:${{ steps.meta.outputs.short_version }}" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
