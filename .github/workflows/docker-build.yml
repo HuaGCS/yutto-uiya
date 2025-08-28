@@ -110,10 +110,10 @@ jobs:
                   CODE_REF="$LATEST_TAG"
                   echo "🔍 latest + use_tag_code=true: 检测到最新标签 $LATEST_TAG，使用该标签代码"
                 else
-                  echo "❌ 未找到任何版本标签，回退到 dev 分支"
+                  echo "❌ 未找到任何版本标签，回退到当前分支"
                   ACTUAL_VERSION="latest"
                   SHORT_VERSION="latest"
-                  CODE_REF="dev"
+                  CODE_REF="${{ github.ref_name }}"
                 fi
               else
                 # 使用指定版本的标签代码
@@ -124,22 +124,22 @@ jobs:
                   CODE_REF="$TAG_NAME"
                   echo "🏷️ 使用指定标签 $TAG_NAME 的代码"
                 else
-                  echo "❌ 标签 $TAG_NAME 不存在，回退到 dev 分支代码"
+                  echo "❌ 标签 $TAG_NAME 不存在，回退到当前分支代码"
                   ACTUAL_VERSION="v$VERSION_INPUT"
                   SHORT_VERSION="$VERSION_INPUT"
-                  CODE_REF="dev"
+                  CODE_REF="${{ github.ref_name }}"
                 fi
               fi
             else
-              # 使用 dev 分支最新代码
+              # 使用当前分支最新代码
               ACTUAL_VERSION="$VERSION_INPUT"
               if [[ "$VERSION_INPUT" != "latest" ]]; then
                 SHORT_VERSION="$VERSION_INPUT"
               else
                 SHORT_VERSION="latest"
               fi
-              CODE_REF="dev"
-              echo "🔧 使用 dev 分支最新代码，镜像标签: $VERSION_INPUT"
+              CODE_REF="${{ github.ref_name }}"
+              echo "🔧 使用 ${{ github.ref_name }} 分支最新代码，镜像标签: $VERSION_INPUT"
             fi
           else
             # 标签触发 - 使用标签对应的代码
@@ -166,6 +166,7 @@ jobs:
           echo "架构输入: $ARCH_INPUT"
           echo "实际版本: ${{ steps.version-ref.outputs.actual_version }}"
           echo "代码引用: ${{ steps.version-ref.outputs.code_ref }}"
+          echo "当前分支: ${{ github.ref_name }}"
 
           # 根据输入设置构建矩阵
           case "$ARCH_INPUT" in
@@ -476,4 +477,3 @@ jobs:
           echo "## ❌ Docker 镜像构建失败！" >> $GITHUB_STEP_SUMMARY
           echo "请查看构建日志获取详细错误信息。" >> $GITHUB_STEP_SUMMARY
           exit 1
-
